@@ -18,6 +18,8 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->initial_ball_speed = unpack(kwargs, "initial_ball_speed");
     env->max_ball_speed = unpack(kwargs, "max_ball_speed");
     env->paddle_speed = unpack(kwargs, "paddle_speed");
+    env->paddle_penalty = unpack(kwargs, "paddle_penalty");
+    env->life_penalty = unpack(kwargs, "life_penalty");
     env->continuous = unpack(kwargs, "continuous");
     init(env);
     return 0;

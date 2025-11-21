@@ -32,6 +32,8 @@ def parse_args():
     parser.add_argument("--vec-batch-size", type=int, default=None, help="Batch size for vector backend (defaults to vec-envs).")
     parser.add_argument("--backend", choices=["Multiprocessing", "Serial", "PufferEnv"], default="Multiprocessing")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--paddle-penalty", type=float, default=0.0, help="Penalty per paddle collision.")
+    parser.add_argument("--life-penalty", type=float, default=0.0, help="Penalty when a ball is lost.")
     parser.add_argument("--bptt-horizon", type=int, default=64)
     parser.add_argument("--train-batch-size", type=int, default=None, help="Trainer batch_size; auto if unset.")
     parser.add_argument("--minibatch-size", type=int, default=None, help="Trainer minibatch_size; auto if unset.")
@@ -90,6 +92,8 @@ def build_config(cli_args):
     cfg["vec"]["overwork"] = cli_args.overwork
 
     cfg["env"]["num_envs"] = cli_args.env_agents
+    cfg["env"]["paddle_penalty"] = cli_args.paddle_penalty
+    cfg["env"]["life_penalty"] = cli_args.life_penalty
     return cfg, total_agents, train_batch
 
 

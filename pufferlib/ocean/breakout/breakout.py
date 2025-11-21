@@ -12,7 +12,7 @@ class Breakout(pufferlib.PufferEnv):
             brick_width=32, brick_height=12,
             brick_rows=6, brick_cols=18,
             initial_ball_speed=256, max_ball_speed=448,
-            paddle_speed=620,
+            paddle_speed=620, paddle_penalty=0.0, life_penalty=0.0,
             continuous=False, log_interval=128,
             buf=None, seed=0):
         self.single_observation_space = gymnasium.spaces.Box(low=0, high=1,
@@ -43,6 +43,7 @@ class Breakout(pufferlib.PufferEnv):
             brick_height=brick_height, brick_rows=brick_rows,
             brick_cols=brick_cols, initial_ball_speed=initial_ball_speed,
             max_ball_speed=max_ball_speed, paddle_speed=paddle_speed,
+            paddle_penalty=paddle_penalty, life_penalty=life_penalty,
             continuous=continuous
         )
 

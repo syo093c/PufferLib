@@ -50,6 +50,8 @@ typedef struct Breakout {
     float ball_y;
     float ball_vx;
     float ball_vy;
+    float paddle_penalty;
+    float life_penalty;
     float* brick_x;
     float* brick_y;
     float* brick_states;
@@ -298,6 +300,7 @@ bool calc_paddle_ball_collisions(Breakout* env, CollisionInfo* collision_info) {
     env->ball_vx = sin(angle) * env->ball_speed * TICK_RATE;
     env->ball_vy = -cos(angle) * env->ball_speed * TICK_RATE;
     env->hits += 1;
+    env->rewards[0] -= env->paddle_penalty;
     if (env->hits % 4 == 0 && env->ball_speed < env->max_ball_speed) {
         env->ball_speed += 64;
     }
@@ -458,6 +461,7 @@ void step_frame(Breakout* env, float action) {
 
     if (env->ball_y >= env->paddle_y + env->paddle_height) {
         env->num_balls -= 1;
+        env->rewards[0] -= env->life_penalty;
         reset_round(env);
     }
     if (env->num_balls < 0 || env->score == env->max_score) {
