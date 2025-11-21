@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 import pufferlib
 import pufferlib.models
+import pufferlib.spaces
 
 from pufferlib.models import Default as Policy
 from pufferlib.models import Convolutional as Conv
@@ -51,6 +52,77 @@ class Boids(nn.Module):
         value = self.value_fn(flat_hidden)
         action = self.actor(flat_hidden).split(self.action_vec, dim=1)
         return action, value
+
+
+class TransformerPolicy(nn.Module):
+    """Transformer encoder over flattened observations; supports discrete/MD/Box heads."""
+    def __init__(self, env, d_model=128, nhead=4, num_layers=2,
+                 dim_feedforward=256, dropout=0.1, use_cls=True, hidden_size=None, **kwargs):
+        super().__init__()
+        d_model = hidden_size or d_model  # allow policy.hidden_size to drive width
+        self.hidden_size = d_model
+        self.is_multidiscrete = isinstance(env.single_action_space, pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space, pufferlib.spaces.Box)
+
+        obs_dim = int(np.prod(env.single_observation_space.shape))
+        self.obs_dim = obs_dim
+        self.embed = nn.Linear(1, d_model)
+        self.use_cls = use_cls
+        if use_cls:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.positional = nn.Parameter(torch.zeros(1, obs_dim, d_model))
+        self.pos_drop = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(d_model)
+
+        if self.is_multidiscrete:
+            self.action_nvec = tuple(env.single_action_space.nvec)
+            act_dim = sum(self.action_nvec)
+            self.actor = pufferlib.pytorch.layer_init(nn.Linear(d_model, act_dim), std=0.01)
+        elif self.is_continuous:
+            act_dim = env.single_action_space.shape[0]
+            self.actor_mean = pufferlib.pytorch.layer_init(nn.Linear(d_model, act_dim), std=0.01)
+            self.actor_logstd = nn.Parameter(torch.zeros(1, act_dim))
+        else:
+            act_dim = env.single_action_space.n
+            self.actor = pufferlib.pytorch.layer_init(nn.Linear(d_model, act_dim), std=0.01)
+
+        self.value_fn = pufferlib.pytorch.layer_init(nn.Linear(d_model, 1), std=1)
+
+    def forward(self, observations, state=None):
+        return self.forward_eval(observations, state)
+
+    def forward_eval(self, observations, state=None):
+        batch = observations.shape[0]
+        x = observations.view(batch, self.obs_dim, 1).float()
+        x = self.embed(x) + self.positional[:, : self.obs_dim, :]
+        if self.use_cls:
+            cls = self.cls_token.expand(batch, -1, -1)
+            x = torch.cat([cls, x], dim=1)
+        x = self.pos_drop(x)
+        h = self.encoder(x)
+        h = self.norm(h)
+        h_pool = h[:, 0] if self.use_cls else h.mean(dim=1)
+
+        if self.is_multidiscrete:
+            logits = self.actor(h_pool).split(self.action_nvec, dim=1)
+        elif self.is_continuous:
+            mean = self.actor_mean(h_pool)
+            logstd = self.actor_logstd.expand_as(mean)
+            logits = torch.distributions.Normal(mean, logstd.exp())
+        else:
+            logits = self.actor(h_pool)
+
+        value = self.value_fn(h_pool)
+        return logits, value
 
 class NMMO3LSTM(pufferlib.models.LSTMWrapper):
     def __init__(self, env, policy, input_size=512, hidden_size=512):
