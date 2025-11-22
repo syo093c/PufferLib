@@ -32,6 +32,9 @@ def parse_args():
     parser.add_argument("--vec-batch-size", type=int, default=None, help="Batch size for vector backend (defaults to vec-envs).")
     parser.add_argument("--backend", choices=["Multiprocessing", "Serial", "PufferEnv"], default="Multiprocessing")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--cuda-device", type=int, default=0, help="CUDA device ID (e.g., 0, 1) when using multiple GPUs.")
+    parser.add_argument("--use-amp", action="store_true", help="Enable automatic mixed precision (AMP) for faster training on CUDA.")
+    parser.add_argument("--cuda-deterministic", action="store_true", help="Enable CUDA deterministic mode for reproducibility.")
     parser.add_argument("--paddle-penalty", type=float, default=0.0, help="Penalty per paddle collision.")
     parser.add_argument("--life-penalty", type=float, default=0.0, help="Penalty when a ball is lost.")
     parser.add_argument("--bptt-horizon", type=int, default=64)
@@ -51,10 +54,41 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_device(device_flag: str) -> str:
+def resolve_device(device_flag: str, cuda_device_id: int = 0) -> str:
     if device_flag == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return f"cuda:{cuda_device_id}"
+        return "cpu"
+    elif device_flag == "cuda":
+        return f"cuda:{cuda_device_id}"
     return device_flag
+
+
+def setup_cuda(device: str, deterministic: bool = False):
+    """Configure CUDA settings and print device information."""
+    if "cuda" in device:
+        device_id = int(device.split(":")[-1]) if ":" in device else 0
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available on this system.")
+
+        if device_id >= torch.cuda.device_count():
+            raise ValueError(f"CUDA device {device_id} not available. Only {torch.cuda.device_count()} device(s) found.")
+
+        torch.cuda.set_device(device_id)
+
+        if deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            print(f"[CUDA] Deterministic mode enabled (may reduce performance)")
+        else:
+            torch.backends.cudnn.benchmark = True
+
+        device_name = torch.cuda.get_device_name(device_id)
+        memory_total = torch.cuda.get_device_properties(device_id).total_memory / 1e9
+        print(f"[CUDA] Using device {device_id}: {device_name} ({memory_total:.2f} GB)")
+        print(f"[CUDA] CUDA version: {torch.version.cuda}")
+    else:
+        print(f"[CPU] Using CPU for training")
 
 
 def compute_batches(total_agents: int, horizon: int, batch_size: int | None, minibatch_size: int | None):
@@ -77,16 +111,28 @@ def build_config(cli_args):
     train_batch, minibatch = compute_batches(total_agents, cli_args.bptt_horizon,
                                              cli_args.train_batch_size, cli_args.minibatch_size)
 
+    device = resolve_device(cli_args.device, cli_args.cuda_device)
+    setup_cuda(device, cli_args.cuda_deterministic)
+
     cfg["policy_name"] = cli_args.policy_name
     cfg["rnn_name"] = cli_args.rnn_name if cli_args.use_rnn else None
     cfg["train"]["use_rnn"] = cli_args.use_rnn
-    cfg["train"]["device"] = resolve_device(cli_args.device)
+    cfg["train"]["device"] = device
     cfg["train"]["bptt_horizon"] = cli_args.bptt_horizon
     cfg["train"]["batch_size"] = train_batch
     cfg["train"]["minibatch_size"] = minibatch
     cfg["train"]["max_minibatch_size"] = minibatch
     cfg["train"]["checkpoint_interval"] = cli_args.checkpoint_interval
     cfg["train"]["total_timesteps"] = train_batch * cli_args.total_epochs
+
+    # Configure AMP if requested and using CUDA
+    if cli_args.use_amp:
+        if "cuda" not in device:
+            print("[Warning] AMP is only supported on CUDA devices. Ignoring --use-amp flag.")
+        else:
+            cfg["train"]["use_amp"] = True
+            print("[CUDA] Automatic Mixed Precision (AMP) enabled")
+
     cfg["policy"]["hidden_size"] = cli_args.policy_hidden
 
     # Configure RNN parameters
@@ -129,12 +175,26 @@ def run_training(cfg, total_epochs: int, sample_epochs: int | None):
     last_logs = {}
     target_epochs = sample_epochs or total_epochs
 
+    device = cfg["train"]["device"]
+    if "cuda" in device:
+        print(f"[CUDA] Initial memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[CUDA] Initial memory reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
     try:
         while trainer.epoch < target_epochs:
             trainer.evaluate()
             last_logs = trainer.train() or last_logs
+
+            if "cuda" in device and trainer.epoch % 100 == 0:
+                print(f"[CUDA] Epoch {trainer.epoch} - Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
     finally:
         ckpt_path = trainer.close()
+
+        if "cuda" in device:
+            print(f"[CUDA] Final memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+            print(f"[CUDA] Peak memory allocated: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+            torch.cuda.empty_cache()
+
     return ckpt_path, last_logs
 
 
@@ -187,7 +247,7 @@ def main():
         if not ckpt or not os.path.exists(ckpt):
             raise FileNotFoundError(f"No checkpoint found at {ckpt}")
         render_checkpoint(ckpt, args.policy_hidden, args.render_steps, args.render_fps,
-                          resolve_device(args.device))
+                          resolve_device(args.device, args.cuda_device))
 
 
 if __name__ == "__main__":
