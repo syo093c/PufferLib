@@ -37,7 +37,11 @@ def parse_args():
     parser.add_argument("--bptt-horizon", type=int, default=64)
     parser.add_argument("--train-batch-size", type=int, default=None, help="Trainer batch_size; auto if unset.")
     parser.add_argument("--minibatch-size", type=int, default=None, help="Trainer minibatch_size; auto if unset.")
-    parser.add_argument("--policy-hidden", type=int, default=128)
+    parser.add_argument("--policy-hidden", type=int, default=512)
+    parser.add_argument("--use-rnn", action="store_true", help="Enable RNN (recurrent network).")
+    parser.add_argument("--rnn-name", type=str, default="Recurrent", help="RNN class name (default: Recurrent = LSTMWrapper).")
+    parser.add_argument("--rnn-input-size", type=int, default=None, help="RNN input size (defaults to policy-hidden).")
+    parser.add_argument("--rnn-hidden-size", type=int, default=None, help="RNN hidden size (defaults to policy-hidden).")
     parser.add_argument("--overwork", action="store_true", help="Allow workers > physical cores.")
     parser.add_argument("--render-after", action="store_true", help="Render with the latest checkpoint after training.")
     parser.add_argument("--render-checkpoint", type=str, default=None, help="Render-only: path to a saved .pt model.")
@@ -74,8 +78,8 @@ def build_config(cli_args):
                                              cli_args.train_batch_size, cli_args.minibatch_size)
 
     cfg["policy_name"] = cli_args.policy_name
-    cfg["rnn_name"] = None
-    cfg["train"]["use_rnn"] = False
+    cfg["rnn_name"] = cli_args.rnn_name if cli_args.use_rnn else None
+    cfg["train"]["use_rnn"] = cli_args.use_rnn
     cfg["train"]["device"] = resolve_device(cli_args.device)
     cfg["train"]["bptt_horizon"] = cli_args.bptt_horizon
     cfg["train"]["batch_size"] = train_batch
@@ -84,6 +88,11 @@ def build_config(cli_args):
     cfg["train"]["checkpoint_interval"] = cli_args.checkpoint_interval
     cfg["train"]["total_timesteps"] = train_batch * cli_args.total_epochs
     cfg["policy"]["hidden_size"] = cli_args.policy_hidden
+
+    # Configure RNN parameters
+    if cli_args.use_rnn:
+        cfg["rnn"]["input_size"] = cli_args.rnn_input_size or cli_args.policy_hidden
+        cfg["rnn"]["hidden_size"] = cli_args.rnn_hidden_size or cli_args.policy_hidden
 
     cfg["vec"]["backend"] = cli_args.backend
     cfg["vec"]["num_envs"] = cli_args.vec_envs
@@ -166,8 +175,9 @@ def main():
         ckpt = args.render_checkpoint
     else:
         cfg, total_agents, train_batch = build_config(args)
+        rnn_info = f"rnn={cfg['rnn_name']}({cfg['rnn']['input_size']},{cfg['rnn']['hidden_size']})" if args.use_rnn else "rnn=None"
         print(f"[trainer] device={cfg['train']['device']} total_agents={total_agents} "
-              f"batch_size={train_batch} checkpoint_interval={cfg['train']['checkpoint_interval']}")
+              f"batch_size={train_batch} checkpoint_interval={cfg['train']['checkpoint_interval']} {rnn_info}")
         ckpt, logs = run_training(cfg, args.total_epochs, args.sample_epochs)
         print(f"[trainer] finished epoch={args.sample_epochs or args.total_epochs} ckpt={ckpt}")
         print(f"[trainer] last logs: {logs}")
