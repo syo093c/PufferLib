@@ -51,6 +51,11 @@ def parse_args():
     parser.add_argument("--render-steps", type=int, default=512)
     parser.add_argument("--render-fps", type=float, default=60.0)
     parser.add_argument("--sample-epochs", type=int, default=None, help="Exit early after N epochs for smoke tests.")
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb-project", type=str, default="pufferlib-breakout", help="W&B project name.")
+    parser.add_argument("--wandb-group", type=str, default="debug", help="W&B group name.")
+    parser.add_argument("--wandb-name", type=str, default=None, help="W&B run name (auto-generated if not set).")
+    parser.add_argument("--wandb-tags", type=str, nargs="*", default=None, help="W&B tags for this run.")
     return parser.parse_args()
 
 
@@ -103,6 +108,32 @@ def compute_batches(total_agents: int, horizon: int, batch_size: int | None, min
     mini = max(mini, horizon)
     mini = min(mini, batch)
     return batch, mini
+
+
+def init_wandb(cli_args, config_dict):
+    """Initialize Weights & Biases logging."""
+    if not cli_args.wandb:
+        return None
+
+    try:
+        import wandb
+    except ImportError:
+        print("[Warning] wandb not installed. Run 'uv pip install wandb' to enable logging.")
+        return None
+
+    run_name = cli_args.wandb_name or f"breakout_ep{cli_args.total_epochs}_bs{config_dict['train']['batch_size']}"
+
+    wandb.init(
+        project=cli_args.wandb_project,
+        group=cli_args.wandb_group,
+        name=run_name,
+        config=config_dict,
+        tags=cli_args.wandb_tags or [],
+        settings=wandb.Settings(console="off"),
+    )
+
+    print(f"[W&B] Initialized: project={cli_args.wandb_project}, group={cli_args.wandb_group}, run={run_name}")
+    return wandb
 
 
 def build_config(cli_args):
@@ -168,7 +199,7 @@ def latest_checkpoint_path(data_dir: str, env_name: str) -> str | None:
     return str(ckpts[-1])
 
 
-def run_training(cfg, total_epochs: int, sample_epochs: int | None):
+def run_training(cfg, total_epochs: int, sample_epochs: int | None, wandb_instance=None):
     vecenv = pufferl.load_env("puffer_breakout", cfg)
     policy = pufferl.load_policy(cfg, vecenv, "puffer_breakout")
     trainer = pufferl.PuffeRL(cfg["train"], vecenv, policy)
@@ -184,6 +215,15 @@ def run_training(cfg, total_epochs: int, sample_epochs: int | None):
         while trainer.epoch < target_epochs:
             trainer.evaluate()
             last_logs = trainer.train() or last_logs
+
+            # Log to wandb
+            if wandb_instance and last_logs:
+                log_dict = {
+                    "epoch": trainer.epoch,
+                    "global_step": trainer.global_step,
+                    **last_logs
+                }
+                wandb_instance.log(log_dict, step=trainer.global_step)
 
             if "cuda" in device and trainer.epoch % 100 == 0:
                 print(f"[CUDA] Epoch {trainer.epoch} - Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
@@ -235,12 +275,20 @@ def main():
         ckpt = args.render_checkpoint
     else:
         cfg, total_agents, train_batch = build_config(args)
+        wandb_instance = init_wandb(args, cfg)
+
         rnn_info = f"rnn={cfg['rnn_name']}({cfg['rnn']['input_size']},{cfg['rnn']['hidden_size']})" if args.use_rnn else "rnn=None"
         print(f"[trainer] device={cfg['train']['device']} total_agents={total_agents} "
               f"batch_size={train_batch} checkpoint_interval={cfg['train']['checkpoint_interval']} {rnn_info}")
-        ckpt, logs = run_training(cfg, args.total_epochs, args.sample_epochs)
-        print(f"[trainer] finished epoch={args.sample_epochs or args.total_epochs} ckpt={ckpt}")
-        print(f"[trainer] last logs: {logs}")
+
+        try:
+            ckpt, logs = run_training(cfg, args.total_epochs, args.sample_epochs, wandb_instance)
+            print(f"[trainer] finished epoch={args.sample_epochs or args.total_epochs} ckpt={ckpt}")
+            print(f"[trainer] last logs: {logs}")
+        finally:
+            if wandb_instance:
+                wandb_instance.finish()
+                print("[W&B] Run finished and logged.")
 
     if args.render_after or args.render_checkpoint:
         ckpt = args.render_checkpoint or ckpt
